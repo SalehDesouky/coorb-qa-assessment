@@ -1,0 +1,287 @@
+{
+  "info": {
+    "name": "FX Rates - indicative rate checks (open.er-api)",
+    "description": "Validates the upstream rates service a banking app uses for indicative FX rates. Run with base-currencies.csv as the data file and the FX Rates environment.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Collection-level guard: every request needs a base currency from the data file.",
+          "if (!pm.iterationData.get('base_currency')) {",
+          "    console.warn('No data file row - run with base-currencies.csv');",
+          "}"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "capturedBase",
+      "value": ""
+    },
+    {
+      "key": "capturedCounterRate",
+      "value": ""
+    },
+    {
+      "key": "capturedSnapshot",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Rates - data-driven",
+      "item": [
+        {
+          "name": "Get latest rates for base",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const base = String(pm.iterationData.get('base_currency')).toUpperCase();",
+                  "const counter = String(pm.iterationData.get('counter_currency')).toUpperCase();",
+                  "const maxMs = Number(pm.environment.get('maxResponseMs'));",
+                  "const maxAgeH = Number(pm.environment.get('maxRateAgeHours'));",
+                  "const minCount = Number(pm.environment.get('minCurrencyCount'));",
+                  "",
+                  "pm.test(`[${base}] HTTP 200`, () => pm.response.to.have.status(200));",
+                  "pm.test(`[${base}] responds within ${maxMs} ms`, () => pm.expect(pm.response.responseTime).to.be.below(maxMs));",
+                  "pm.test(`[${base}] content-type is JSON`, () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                  "",
+                  "const body = pm.response.json();",
+                  "// This provider reports errors with HTTP 200, so the body flag is the real success signal.",
+                  "pm.test(`[${base}] body.result is \"success\"`, () => pm.expect(body.result).to.eql('success'));",
+                  "pm.test(`[${base}] matches the rates schema`, () => pm.response.to.have.jsonSchema({\"type\":\"object\",\"required\":[\"result\",\"base_code\",\"time_last_update_unix\",\"time_next_update_unix\",\"rates\"],\"properties\":{\"result\":{\"type\":\"string\",\"enum\":[\"success\"]},\"base_code\":{\"type\":\"string\",\"pattern\":\"^[A-Z]{3}$\"},\"time_last_update_unix\":{\"type\":\"integer\"},\"time_next_update_unix\":{\"type\":\"integer\"},\"rates\":{\"type\":\"object\",\"minProperties\":1,\"propertyNames\":{\"pattern\":\"^[A-Z]{3}$\"},\"additionalProperties\":{\"type\":\"number\",\"exclusiveMinimum\":0}}}}));",
+                  "pm.test(`[${base}] base_code echoes the requested base`, () => pm.expect(body.base_code).to.eql(base));",
+                  "",
+                  "const rates = body.rates || {};",
+                  "const codes = Object.keys(rates);",
+                  "pm.test(`[${base}] at least ${minCount} currencies`, () => pm.expect(codes.length).to.be.at.least(minCount));",
+                  "pm.test(`[${base}] rate for the base itself is exactly 1`, () => pm.expect(rates[base]).to.eql(1));",
+                  "pm.test(`[${base}] every rate is a finite number > 0`, () => {",
+                  "    const bad = codes.filter((c) => !(typeof rates[c] === 'number' && isFinite(rates[c]) && rates[c] > 0));",
+                  "    pm.expect(bad, `invalid rates: ${bad.join(',')}`).to.be.empty;",
+                  "});",
+                  "",
+                  "const expected = String(pm.iterationData.get('expected_targets')).split('|');",
+                  "pm.test(`[${base}] expected targets present: ${expected.join(',')}`, () => {",
+                  "    const missing = expected.filter((c) => !(c in rates));",
+                  "    pm.expect(missing, `missing: ${missing.join(',')}`).to.be.empty;",
+                  "});",
+                  "",
+                  "// Wide band: catches an inverted rate or a decimal shift, not normal market movement.",
+                  "const sTarget = pm.iterationData.get('sanity_target');",
+                  "const sMin = Number(pm.iterationData.get('sanity_min'));",
+                  "const sMax = Number(pm.iterationData.get('sanity_max'));",
+                  "pm.test(`[${base}] ${base}->${sTarget} within sanity band ${sMin}-${sMax}`, () => pm.expect(rates[sTarget]).to.be.within(sMin, sMax));",
+                  "",
+                  "const nowS = Math.floor(Date.now() / 1000);",
+                  "pm.test(`[${base}] rates are no older than ${maxAgeH} h`, () => pm.expect(nowS - body.time_last_update_unix).to.be.below(maxAgeH * 3600));",
+                  "pm.test(`[${base}] next update is after last update`, () => pm.expect(body.time_next_update_unix).to.be.above(body.time_last_update_unix));",
+                  "",
+                  "// Capture for the reciprocal check in the next request.",
+                  "pm.collectionVariables.set('capturedBase', base);",
+                  "pm.collectionVariables.set('capturedCounterRate', String(rates[counter]));",
+                  "pm.collectionVariables.set('capturedSnapshot', String(body.time_last_update_unix));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "https://{{apiHost}}/latest/{{base_currency}}",
+            "description": "Positive check per data row. Captures the base->counter rate for the reciprocal check."
+          }
+        },
+        {
+          "name": "Get latest rates for counter (reciprocal check)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const base = pm.collectionVariables.get('capturedBase');",
+                  "const counter = String(pm.iterationData.get('counter_currency')).toUpperCase();",
+                  "const captured = Number(pm.collectionVariables.get('capturedCounterRate'));",
+                  "const snapshot = Number(pm.collectionVariables.get('capturedSnapshot'));",
+                  "const tol = Number(pm.environment.get('reciprocalTolerance'));",
+                  "",
+                  "pm.test(`[${counter}] HTTP 200 and success`, () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().result).to.eql('success');",
+                  "});",
+                  "const body = pm.response.json();",
+                  "// Only compare like-for-like: both responses must come from the same provider snapshot.",
+                  "if (body.time_last_update_unix !== snapshot) {",
+                  "    console.warn(`Snapshot changed between requests (${snapshot} -> ${body.time_last_update_unix}); reciprocal check skipped`);",
+                  "    return;",
+                  "}",
+                  "pm.test(`${counter}->${base} is the reciprocal of ${base}->${counter} (rel. tol ${tol})`, () => {",
+                  "    const product = body.rates[base] * captured;",
+                  "    pm.expect(Math.abs(product - 1)).to.be.below(tol);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "https://{{apiHost}}/latest/{{counter_currency}}",
+            "description": "Uses the captured rate: counter->base must be ~1/(base->counter) from the same snapshot."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Negative cases",
+      "description": "Data-independent, so each request runs once (first iteration only), not once per data row.",
+      "item": [
+        {
+          "name": "Unsupported but well-formed code",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Negative cases do not use the data file, so run them in the first iteration only.",
+                  "if (pm.info.iteration > 0) {",
+                  "    pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const code = pm.environment.get('unsupportedCode');",
+                  "// Actual provider behaviour: HTTP 200 with the error in the body.",
+                  "pm.test(`[${code}] provider returns HTTP 200 for an unsupported code`, () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(`[${code}] body.result is \"error\"`, () => pm.expect(body.result).to.eql('error'));",
+                  "pm.test(`[${code}] error-type is \"unsupported-code\"`, () => pm.expect(body['error-type']).to.eql('unsupported-code'));",
+                  "pm.test(`[${code}] no rates are returned`, () => pm.expect(body).to.not.have.property('rates'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "https://{{apiHost}}/latest/{{unsupportedCode}}",
+            "description": "Asserts actual behaviour: HTTP 200 with an error body."
+          }
+        },
+        {
+          "name": "Malformed code",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Negative cases do not use the data file, so run them in the first iteration only.",
+                  "if (pm.info.iteration > 0) {",
+                  "    pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const code = pm.environment.get('malformedCode');",
+                  "// Actual provider behaviour: web-server 404 with an HTML page, not a JSON error.",
+                  "pm.test(`[${code}] provider returns 404`, () => pm.response.to.have.status(404));",
+                  "pm.test(`[${code}] response is not JSON`, () => pm.expect(pm.response.headers.get('Content-Type')).to.not.include('application/json'));",
+                  "pm.test(`[${code}] body cannot be parsed as JSON`, () => pm.expect(() => JSON.parse(pm.response.text())).to.throw());"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "https://{{apiHost}}/latest/{{malformedCode}}",
+            "description": "Asserts actual behaviour: 404 HTML from the web server."
+          }
+        },
+        {
+          "name": "Over-length code (silent truncation)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Negative cases do not use the data file, so run them in the first iteration only.",
+                  "if (pm.info.iteration > 0) {",
+                  "    pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const code = pm.environment.get('overLengthCode');",
+                  "const body = pm.response.json();",
+                  "// KNOWN RISK, asserted as observed: the provider truncates to the first 3 letters and reports success.",
+                  "pm.test(`[${code}] provider reports success for an over-length code`, () => pm.expect(body.result).to.eql('success'));",
+                  "pm.test(`[${code}] base_code is silently truncated to ${code.slice(0, 3)}`, () => pm.expect(body.base_code).to.eql(code.slice(0, 3)));",
+                  "pm.test(`[${code}] base_code does NOT equal the requested code (consumer must guard)`, () => pm.expect(body.base_code).to.not.eql(code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "https://{{apiHost}}/latest/{{overLengthCode}}",
+            "description": "Asserts actual behaviour: truncated to 3 letters and reported as success. Documented as a consumer-side risk."
+          }
+        }
+      ]
+    }
+  ]
+}
