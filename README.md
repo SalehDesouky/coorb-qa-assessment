@@ -28,7 +28,7 @@ Submission at **Lead** level (QA Manager role), so all five tasks are included.
 
 - **Task 1:** every question in sheet *1.1 Questions* has a fallback assumption I tested against. The ones that shape the test cases most: limits are inclusive, the daily limit is a calendar day in the bank's time zone, the fee is included in the balance check but not in the limit, and a failed transfer must never lose money.
 - **Task 3:** I used `open.er-api.com`. The backup (`api.frankfurter.app`) returned an HTTP 301 redirect when I tried it. The response-time (2,000 ms) and rate-age (26 h) thresholds are provisional and should come from the app's own requirements.
-- **Task 4:** `Bank_Admin_Console_Demo.html` was not attached to the email I received. I have asked for it and designed from the written description in the brief. If the real page differs, only the field catalog changes.
+- **Task 4:** `Bank_Admin_Console_Demo.html` was not attached to the email I received. As confirmed by the recruitment team, I designed from the written description in the brief. If the real page differs, only the field list changes.
 - **Task 5:** the total number of regression tests isn't given, so I haven't inferred one from the 68% pass rate.
 
 ## Questions I would ask the BA / PO
